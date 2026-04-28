@@ -35,4 +35,4 @@ A cost-effective smart helmet system that detects accidents and sends alerts wit
 
 ## Status
 
-In Progress (Final Year Project)
+(Final Year Project)
