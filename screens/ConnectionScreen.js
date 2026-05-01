@@ -1,173 +1,174 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
   TouchableOpacity,
   StyleSheet,
+  Alert,
   PermissionsAndroid,
 } from 'react-native';
 
 import RNBluetoothClassic from 'react-native-bluetooth-classic';
-import SendSMS from 'react-native-sms';
-import { Linking } from 'react-native';
-
 
 const ConnectionScreen = ({ route }) => {
   const name = route?.params?.name || 'User';
-  const contacts = route?.params?.contacts || [];
 
-  const [connected, setConnected] = useState(false);
-  const [status, setStatus] = useState('Not Connected');
-  const [data, setData] = useState('');
+  const [ws, setWs] = useState(null);
+  const [status, setStatus] = useState('Connecting...');
+  const [btStatus, setBtStatus] = useState('Not Connected');
   const [accident, setAccident] = useState(false);
-
-  const [latitude, setLatitude] = useState(null);
-  const [longitude, setLongitude] = useState(null);
+  const [sensorData, setSensorData] = useState('No data yet');
+  const [location, setLocation] = useState("");
 
   // 🔐 Permissions
   const requestPermissions = async () => {
-    try {
-      await PermissionsAndroid.requestMultiple([
-        PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
-        PermissionsAndroid.PERMISSIONS.SEND_SMS,
-        PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
-        PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
-      ]);
-    } catch (err) {
-      console.log(err);
-    }
+    await PermissionsAndroid.requestMultiple([
+      PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+      PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+      PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+    ]);
   };
 
+  // 🌐 WebSocket Setup
   useEffect(() => {
     requestPermissions();
+
+    const socket = new WebSocket('ws://192.168.1.13:3000');
+
+    socket.onopen = () => {
+      console.log('✅ Server connected');
+      setStatus('🟢 Server Connected');
+    };
+
+    socket.onmessage = event => {
+      console.log('📩 WS:', event.data);
+
+      if (event.data === 'ACCIDENT') {
+        setAccident(true);
+        Alert.alert('🚨 Accident Detected (Other Device)');
+      }
+
+      if (event.data.startsWith("LAT:")) {
+        setLocation(event.data);
+      }
+    };
+
+    socket.onerror = () => {
+      setStatus('❌ Server Error');
+    };
+
+    socket.onclose = () => {
+      setStatus('🔴 Server Disconnected');
+    };
+
+    setWs(socket);
+
+    return () => socket.close();
   }, []);
 
-  // 🔘 Connect
-  const connectDevice = async () => {
+  // 🔵 Connect Bluetooth
+  const connectBluetooth = async () => {
     try {
       const devices = await RNBluetoothClassic.getBondedDevices();
       const hc05 = devices.find(d => d.name === 'HC-05');
 
       if (!hc05) {
-        console.log('HC-05 not paired');
+        Alert.alert('HC-05 not paired');
         return;
       }
 
-      const connection = await hc05.connect();
+      const connected = await hc05.connect();
 
-      if (connection) {
-        setConnected(true);
-        setStatus('Connected ✅');
+      if (connected) {
+        setBtStatus('🟢 HC-05 Connected');
         readData(hc05);
       }
     } catch (err) {
-      console.log(err);
+      console.log('Bluetooth error:', err);
     }
   };
 
-  // 📡 Read Data (stable loop)
+  // 📡 Read Bluetooth Data (FINAL STABLE)
   const readData = async (device) => {
     try {
       while (true) {
-        const message = await device.read();
-        if (!message) continue;
+        const msg = await device.read();
 
-        console.log("RAW:", message);
+        if (!msg) continue;
 
-        setData(message);
+        const cleanMsg = msg.replace(/[^\x20-\x7E]/g, "").trim();
+
+        if (!cleanMsg) continue;
+
+        console.log("📡 Data:", cleanMsg);
+
+        setSensorData(cleanMsg);
+
+        // 🚨 Accident trigger
+        if (cleanMsg === "ACCIDENT") {
+          triggerAccident();
+        }
 
         // 📍 GPS parsing
-        if (message.includes('LAT')) {
-          const lat = message.split(':')[1]?.trim();
-          setLatitude(lat);
-        }
-
-        if (message.includes('LON')) {
-          const lon = message.split(':')[1]?.trim();
-          setLongitude(lon);
-        }
-
-        // 🚨 Accident
-        if (message.includes('ACCIDENT') && !accident) {
-          setAccident(true);
-          handleAccident();
+        if (cleanMsg.startsWith("LAT:")) {
+          setLocation(cleanMsg);
         }
       }
     } catch (err) {
-      console.log('Read error:', err);
+      console.log("Read error:", err);
     }
   };
 
-  // 🚨 Accident handler
-  const handleAccident = () => {
-    const lat = latitude || "28.6139";
-    const lon = longitude || "77.2090";
+  // 🚨 Trigger accident
+  const triggerAccident = () => {
+    if (accident) return;
 
-    const message = `🚨 Accident detected!
-Location: https://maps.google.com/?q=${lat},${lon}`;
+    setAccident(true);
+    Alert.alert('🚨 Accident Detected (This Device)');
 
-    SendSMS.send({
-      body: message,
-      recipients: contacts,
-      successTypes: ['sent', 'queued'],
-    });
+    if (ws && ws.readyState === 1) {
+      ws.send('ACCIDENT');
+
+      if (location) {
+        ws.send(location); // send GPS too
+      }
+
+      console.log('📤 Sent to server');
+    }
   };
-
-  // 🧪 Test SMS
-  const testSMS = () => {
-  console.log("Opening SMS app...");
-
-  const number = "8527324332";   //contacts[0]
-  const message = "Test SMS from Accident App";
-
-  const url = `sms:${number}?body=${encodeURIComponent(message)}`;
-
-  Linking.openURL(url)
-    .then(() => console.log("SMS app opened"))
-    .catch(err => console.log("Error opening SMS:", err));
-};
 
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Welcome, {name}</Text>
 
-      <View style={styles.centerBox}>
+      <Text style={styles.status}>{status}</Text>
+      <Text style={styles.status}>{btStatus}</Text>
 
-        {/* CONNECT */}
-        <TouchableOpacity style={styles.button} onPress={connectDevice}>
-          <Text style={styles.buttonText}>
-            {connected ? 'Connected' : 'Start Monitoring'}
-          </Text>
-        </TouchableOpacity>
+      <TouchableOpacity style={styles.button} onPress={connectBluetooth}>
+        <Text style={styles.buttonText}>Connect HC-05</Text>
+      </TouchableOpacity>
 
-        {/* TEST SMS */}
-        <TouchableOpacity style={styles.testButton} onPress={testSMS}>
-          <Text style={styles.buttonText}>Test SMS</Text>
-        </TouchableOpacity>
+      {/* 📡 Live Sensor Data */}
+      <Text style={{ marginTop: 20 }}>
+        Data: {sensorData}
+      </Text>
 
-        <Text style={styles.status}>Status: {status}</Text>
+      {/* 🚨 FINAL UI */}
+      {accident && (
+        <View style={styles.alertBox}>
+          <Text style={styles.alertText}>🚨 ACCIDENT DETECTED</Text>
 
-        <Text style={styles.data}>Data: {data}</Text>
-
-        <Text style={styles.data}>
-          GPS: {latitude || "28.6139"}, {longitude || "77.2090"}
-        </Text>
-
-        {/* 🚨 NICE LOOKING ALERT TEXT */}
-        {accident && (
-          <View style={styles.alertBox}>
-            <Text style={styles.alertText}>🚨 Accident Detected</Text>
-            <Text style={styles.alertSub}>
-              Emergency message sent to contacts
+          {location ? (
+            <Text style={styles.locationText}>
+              📍 {location}
             </Text>
-          </View>
-        )}
-
-        <Text style={styles.note}>
-          Ensure your safety device is powered on
-        </Text>
-
-      </View>
+          ) : (
+            <Text style={styles.locationText}>
+              📍 Location not available
+            </Text>
+          )}
+        </View>
+      )}
     </View>
   );
 };
@@ -177,74 +178,44 @@ export default ConnectionScreen;
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#ffffff',
+    justifyContent: 'center',
     padding: 20,
+    backgroundColor: '#fff',
   },
   title: {
     fontSize: 20,
-    fontWeight: 'bold',
-    color: '#111827',
-    marginTop: 10,
-  },
-  centerBox: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  button: {
-    backgroundColor: '#2563eb',
-    paddingVertical: 18,
-    paddingHorizontal: 40,
-    borderRadius: 30,
     marginBottom: 20,
-  },
-  testButton: {
-    backgroundColor: '#16a34a',
-    paddingVertical: 15,
-    paddingHorizontal: 35,
-    borderRadius: 30,
-    marginBottom: 25,
-  },
-  buttonText: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: '600',
+    fontWeight: 'bold',
   },
   status: {
     fontSize: 16,
     marginBottom: 10,
-    color: '#374151',
   },
-  data: {
-    fontSize: 14,
-    marginBottom: 10,
-    color: '#6b7280',
-  },
-
-  // 🚨 NEW STYLED ALERT BOX
-  alertBox: {
-    backgroundColor: '#fee2e2',
+  button: {
+    backgroundColor: '#2563eb',
     padding: 15,
-    borderRadius: 12,
-    marginTop: 10,
+    borderRadius: 10,
     alignItems: 'center',
+    marginTop: 20,
+  },
+  buttonText: {
+    color: 'white',
+    fontSize: 16,
+  },
+  alertBox: {
+    marginTop: 30,
+    backgroundColor: '#fee2e2',
+    padding: 20,
+    borderRadius: 10,
   },
   alertText: {
+    color: 'red',
     fontSize: 18,
-    color: '#b91c1c',
     fontWeight: 'bold',
   },
-  alertSub: {
-    fontSize: 12,
-    color: '#7f1d1d',
-    marginTop: 4,
-  },
-
-  note: {
+  locationText: {
+    marginTop: 10,
     fontSize: 14,
-    color: 'gray',
-    textAlign: 'center',
-    marginTop: 20,
-    paddingHorizontal: 20,
+    color: '#7f1d1d',
   },
 });
