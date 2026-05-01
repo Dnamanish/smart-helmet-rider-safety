@@ -6,6 +6,7 @@ import {
   StyleSheet,
   Alert,
   PermissionsAndroid,
+  Linking,
 } from 'react-native';
 
 import RNBluetoothClassic from 'react-native-bluetooth-classic';
@@ -18,7 +19,7 @@ const ConnectionScreen = ({ route }) => {
   const [btStatus, setBtStatus] = useState('Not Connected');
   const [accident, setAccident] = useState(false);
   const [sensorData, setSensorData] = useState('No data yet');
-  const [location, setLocation] = useState("");
+  const [location, setLocation] = useState(null);
 
   // 🔐 Permissions
   const requestPermissions = async () => {
@@ -29,37 +30,40 @@ const ConnectionScreen = ({ route }) => {
     ]);
   };
 
-  // 🌐 WebSocket Setup
+  // 🌐 WebSocket
   useEffect(() => {
     requestPermissions();
 
     const socket = new WebSocket('ws://192.168.1.13:3000');
 
     socket.onopen = () => {
-      console.log('✅ Server connected');
       setStatus('🟢 Server Connected');
     };
 
     socket.onmessage = event => {
-      console.log('📩 WS:', event.data);
+      const msg = event.data;
+      console.log('📩 WS:', msg);
 
-      if (event.data === 'ACCIDENT') {
+      // ✅ Receive combined message
+      if (msg.startsWith('ACCIDENT')) {
         setAccident(true);
         Alert.alert('🚨 Accident Detected (Other Device)');
+
+        const parts = msg.split('|');
+
+        if (parts[1]) {
+          const coords = parts[1];
+
+          const lat = coords.split(',')[0].split(':')[1];
+          const lon = coords.split(',')[1].split(':')[1];
+
+          setLocation({ lat, lon });
+        }
       }
-
-      if (event.data.startsWith("LAT:")) {
-        setLocation(event.data);
-      }
     };
 
-    socket.onerror = () => {
-      setStatus('❌ Server Error');
-    };
-
-    socket.onclose = () => {
-      setStatus('🔴 Server Disconnected');
-    };
+    socket.onerror = () => setStatus('❌ Server Error');
+    socket.onclose = () => setStatus('🔴 Server Disconnected');
 
     setWs(socket);
 
@@ -84,11 +88,11 @@ const ConnectionScreen = ({ route }) => {
         readData(hc05);
       }
     } catch (err) {
-      console.log('Bluetooth error:', err);
+      console.log(err);
     }
   };
 
-  // 📡 Read Bluetooth Data (FINAL STABLE)
+  // 📡 Read Bluetooth Data
   const readData = async (device) => {
     try {
       while (true) {
@@ -96,30 +100,34 @@ const ConnectionScreen = ({ route }) => {
 
         if (!msg) continue;
 
-        const cleanMsg = msg.replace(/[^\x20-\x7E]/g, "").trim();
-
+        const cleanMsg = msg.replace(/[^\x20-\x7E]/g, '').trim();
         if (!cleanMsg) continue;
 
-        console.log("📡 Data:", cleanMsg);
+        console.log('📡 BT:', cleanMsg);
 
         setSensorData(cleanMsg);
 
-        // 🚨 Accident trigger
-        if (cleanMsg === "ACCIDENT") {
+        // detect accident from Arduino
+        if (cleanMsg === 'ACCIDENT') {
           triggerAccident();
         }
 
-        // 📍 GPS parsing
-        if (cleanMsg.startsWith("LAT:")) {
-          setLocation(cleanMsg);
+        // store GPS
+        if (cleanMsg.startsWith('LAT:')) {
+          const parts = cleanMsg.split(',');
+
+          const lat = parts[0].split(':')[1];
+          const lon = parts[1].split(':')[1];
+
+          setLocation({ lat, lon });
         }
       }
     } catch (err) {
-      console.log("Read error:", err);
+      console.log('Read error:', err);
     }
   };
 
-  // 🚨 Trigger accident
+  // 🚨 Trigger Accident
   const triggerAccident = () => {
     if (accident) return;
 
@@ -127,14 +135,23 @@ const ConnectionScreen = ({ route }) => {
     Alert.alert('🚨 Accident Detected (This Device)');
 
     if (ws && ws.readyState === 1) {
-      ws.send('ACCIDENT');
+      const lat = location?.lat || "28.6692";
+      const lon = location?.lon || "77.4538";
 
-      if (location) {
-        ws.send(location); // send GPS too
-      }
+      const message = `ACCIDENT|LAT:${lat},LON:${lon}`;
 
-      console.log('📤 Sent to server');
+      ws.send(message);
+
+      console.log("📤 Sent:", message);
     }
+  };
+
+  // 📍 Open Map
+  const openMap = () => {
+    if (!location) return;
+
+    const url = `https://www.google.com/maps?q=${location.lat},${location.lon}`;
+    Linking.openURL(url);
   };
 
   return (
@@ -148,20 +165,20 @@ const ConnectionScreen = ({ route }) => {
         <Text style={styles.buttonText}>Connect HC-05</Text>
       </TouchableOpacity>
 
-      {/* 📡 Live Sensor Data */}
       <Text style={{ marginTop: 20 }}>
         Data: {sensorData}
       </Text>
 
-      {/* 🚨 FINAL UI */}
       {accident && (
         <View style={styles.alertBox}>
           <Text style={styles.alertText}>🚨 ACCIDENT DETECTED</Text>
 
           {location ? (
-            <Text style={styles.locationText}>
-              📍 {location}
-            </Text>
+            <TouchableOpacity onPress={openMap}>
+              <Text style={styles.locationText}>
+                📍 Tap to view location
+              </Text>
+            </TouchableOpacity>
           ) : (
             <Text style={styles.locationText}>
               📍 Location not available
